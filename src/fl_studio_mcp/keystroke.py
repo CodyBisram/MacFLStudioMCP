@@ -2,7 +2,8 @@
 companion piano-roll pyscript.
 
 Windows: Win32 SendInput.
-macOS:   osascript to focus FL Studio + pynput to send the keystroke.
+macOS:   System Events raises the running FL Studio process, then Quartz posts
+         Cmd+Opt+Y as HID-level key events (real Cmd/Opt key presses).
 Other:   no-op; user must press the hotkey manually.
 """
 
@@ -55,69 +56,81 @@ def wait_for_state(deadline_sec: float = 3.0) -> dict | None:
     return None
 
 
-_FL_FRONTMOST_UNTIL = 0.0  # monotonic timestamp through which we trust FL is frontmost
-_kb_controller = None       # cached pynput Controller (init is slow; reuse it)
+_FL_PROCESS = "OsxFL"    # FL Studio's process name on macOS (all versions)
+_FOCUS_SETTLE_SEC = 1.0  # wait after the piano-roll focus call before the hotkey
+
+# Raise the *running* FL Studio process and wait (up to ~2s) until it is frontmost.
+# Targeting the process rather than an app name works for any FL version and never
+# launches a different installed version (2025 and 2026 share a bundle id).
+_RAISE_FL_SCRIPT = (
+    'tell application "System Events"\n'
+    '  if not (exists process "%s") then return "not running"\n'
+    '  set frontmost of process "%s" to true\n'
+    '  repeat 40 times\n'
+    '    set fm to name of first application process whose frontmost is true\n'
+    '    if fm is "%s" then exit repeat\n'
+    '    delay 0.05\n'
+    '  end repeat\n'
+    'end tell\n'
+    'return fm\n'
+) % (_FL_PROCESS, _FL_PROCESS, _FL_PROCESS)
 
 
-def send_hotkey_mac() -> bool:
-    """Focus FL Studio if needed, send Cmd+Opt+Y. Leaves FL focused on exit.
+def _send_cmd_opt_y_quartz() -> None:
+    """Post Cmd down, Opt down, Y down, Y up, Opt up, Cmd up at the HID event tap."""
+    import time as _time
+    from Quartz import (CGEventSourceCreate, kCGEventSourceStateHIDSystemState,
+                        CGEventCreateKeyboardEvent, CGEventSetFlags, CGEventPost,
+                        kCGHIDEventTap, kCGEventFlagMaskCommand, kCGEventFlagMaskAlternate)
 
-    On cold start: one osascript `activate` call (~150-250ms) + pynput keystroke.
-    On warm calls within 5s: skip osascript entirely — just pynput (~40ms total).
+    src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState)
+    CMD, OPT, Y = 55, 58, 16
+    BOTH = kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate
 
-    Returns True on success.
+    def key(code, down, flags):
+        e = CGEventCreateKeyboardEvent(src, code, down)
+        CGEventSetFlags(e, flags)
+        CGEventPost(kCGHIDEventTap, e)
+        _time.sleep(0.03)
+
+    key(CMD, True, kCGEventFlagMaskCommand)
+    key(OPT, True, BOTH)
+    key(Y, True, BOTH)
+    key(Y, False, BOTH)
+    key(OPT, False, kCGEventFlagMaskCommand)
+    key(CMD, False, 0)
+
+
+def send_hotkey_mac(focus_piano_roll=None) -> bool:
+    """Bring FL Studio to the front, focus the piano roll, send Cmd+Opt+Y.
+
+      1. raise the running FL Studio process and wait until it is frontmost
+      2. call focus_piano_roll() (bridge ui.showWindow) while FL is foreground, then settle
+      3. post Cmd+Opt+Y as Quartz HID events — FL 2026 ignores System Events
+         `keystroke ... using {...}`, where the modifiers are only event flags
+
+    Returns True if the keystroke was posted, False if FL could not be brought
+    to the front (nothing is sent in that case). A posted keystroke can still be
+    ignored by FL; callers detect that by waiting for the pyscript's state file.
     """
-    global _FL_FRONTMOST_UNTIL, _kb_controller
     if sys.platform != "darwin":
         return False
     try:
         import subprocess
-        import time as _time
 
-        now = _time.monotonic()
-        if now >= _FL_FRONTMOST_UNTIL:
-            # Single osascript call: activate FL (no-op if already frontmost).
-            subprocess.run(
-                ["osascript", "-e", 'tell application "FL Studio 2025" to activate'],
-                timeout=3, capture_output=True,
-            )
-            _time.sleep(0.02)
-
-        # Prefer System Events on macOS: FL's menu shortcut handling has proven
-        # more reliable with a native AppleScript keystroke than pynput events.
-        script = (
-            'tell application "FL Studio 2025" to activate\n'
-            'delay 0.05\n'
-            'tell application "System Events"\n'
-            '  keystroke "y" using {command down, option down}\n'
-            'end tell\n'
-        )
         result = subprocess.run(
-            ["osascript", "-e", script],
-            timeout=3, capture_output=True,
+            ["osascript", "-e", _RAISE_FL_SCRIPT],
+            timeout=5, capture_output=True, text=True,
         )
-        if result.returncode == 0:
-            _FL_FRONTMOST_UNTIL = _time.monotonic() + 5.0
-            return True
-
-        if _kb_controller is None:
-            from pynput.keyboard import Key, Controller
-            _kb_controller = Controller()
-            _kb_controller._Key = Key  # stash Key on the instance for reuse
-
-        kb = _kb_controller
-        Key = kb._Key
-        kb.press(Key.cmd)
-        kb.press(Key.alt)
-        _time.sleep(0.02)
-        kb.press("y")
-        kb.release("y")
-        _time.sleep(0.02)
-        kb.release(Key.alt)
-        kb.release(Key.cmd)
-
-        # FL stays focused; trust this for the next 5s on chained calls.
-        _FL_FRONTMOST_UNTIL = _time.monotonic() + 5.0
+        frontmost = result.stdout.strip()
+        if result.returncode != 0 or frontmost != _FL_PROCESS:
+            log.warning("could not bring FL Studio to the front (rc=%s, frontmost=%r, err=%r)",
+                        result.returncode, frontmost, result.stderr.strip())
+            return False
+        if focus_piano_roll is not None:
+            focus_piano_roll()
+            time.sleep(_FOCUS_SETTLE_SEC)
+        _send_cmd_opt_y_quartz()
         return True
     except Exception as e:
         log.warning("mac keystroke failed: %s", e)

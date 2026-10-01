@@ -244,7 +244,14 @@ def register(mcp: FastMCP) -> None:
                     break
 
         results = []
+        aborted = False
         for i, pat in enumerate(patterns):
+            if aborted:
+                # Fail fast: a step that timed out usually means FL is ignoring the
+                # shortcut, so don't make the user sit through a prompt per pattern.
+                results.append({"pattern": pat, "ok": False, "skipped": True,
+                                "note_count": 0, "notes": []})
+                continue
             if i > 0 or pat["index"] != start_idx:
                 c.call("patterns.select", index=pat["index"])
                 time.sleep(0.2)
@@ -253,7 +260,10 @@ def register(mcp: FastMCP) -> None:
             selected_channel = c.call("channels.selected").get("channel")
             state = read_result.get("state") or {}
             note_count = len(state.get("notes") or [])
-            _pattern_note_counts[pat["index"]] = note_count
+            if read_result.get("ok"):
+                _pattern_note_counts[pat["index"]] = note_count
+            else:
+                aborted = True
             results.append({
                 "pattern": pat,
                 "channel": selected_channel,
@@ -261,18 +271,24 @@ def register(mcp: FastMCP) -> None:
                 "hotkey_sent": read_result.get("hotkey_sent"),
                 "note_count": note_count,
                 "notes": state.get("notes") or [],
+                "note": read_result.get("note"),
+                "picked_up_by": (read_result.get("pickup") or {}).get("picked_up_by"),
             })
 
         restored = None
         if restore_start and start_idx is not None:
             c.call("patterns.select", index=start_idx)
             time.sleep(0.2)
-            restore_result = stage_and_run([{"action": "export_only"}], wait_sec=5.0)
-            restored = {
-                "pattern": start_pattern,
-                "channel": start_channel.get("channel"),
-                "ok": bool(restore_result.get("ok")),
-            }
+            if aborted:
+                restored = {"pattern": start_pattern, "channel": start_channel.get("channel"),
+                            "ok": False, "skipped_refresh": "an earlier read failed"}
+            else:
+                restore_result = stage_and_run([{"action": "export_only"}], wait_sec=5.0)
+                restored = {
+                    "pattern": start_pattern,
+                    "channel": start_channel.get("channel"),
+                    "ok": bool(restore_result.get("ok")),
+                }
         elif navigate_after_pattern is not None:
             # Navigate to the first edit target so FL shows it while LLM plans
             c.call("patterns.select", index=navigate_after_pattern)
@@ -286,6 +302,7 @@ def register(mcp: FastMCP) -> None:
             "results": results,
             "restored": restored,
             "total_notes": sum(r["note_count"] for r in results),
+            "aborted": aborted,
         }
 
     @mcp.tool()
@@ -354,17 +371,23 @@ def register(mcp: FastMCP) -> None:
             if start_ch is not None:
                 c.call("channels.select", index=start_ch)
             time.sleep(0.2)
-            restore_result = stage_and_run([{"action": "export_only"}], wait_sec=5.0)
-            restored = {
-                "pattern": start_pattern,
-                "channel": start_channel.get("channel"),
-                "ok": bool(restore_result.get("ok")),
-            }
+            if not write_result.get("ok"):
+                restored = {"pattern": start_pattern, "channel": start_channel.get("channel"),
+                            "ok": False, "skipped_refresh": "the write failed"}
+            else:
+                restore_result = stage_and_run([{"action": "export_only"}], wait_sec=5.0)
+                restored = {
+                    "pattern": start_pattern,
+                    "channel": start_channel.get("channel"),
+                    "ok": bool(restore_result.get("ok")),
+                }
 
         return {
             "ok": write_result.get("ok", False),
             "note_count": len(pyscript_notes),
             "hotkey_sent": write_result.get("hotkey_sent"),
+            "note": write_result.get("note"),
+            "pickup": write_result.get("pickup"),
             "restored": restored,
         }
 
@@ -398,11 +421,19 @@ def register(mcp: FastMCP) -> None:
         start_ch_idx = (start_channel.get("channel") or {}).get("index")
 
         results = []
+        aborted = False
         for entry in writes:
             channel = int(entry["channel"])
             pattern = int(entry["pattern"])
             raw_notes = entry.get("notes", [])
             current_note_count = entry.get("current_note_count")
+
+            if aborted:
+                # Fail fast: a step that timed out usually means FL is ignoring the
+                # shortcut, so don't make the user sit through a prompt per pattern.
+                results.append({"channel": channel, "pattern": pattern, "ok": False,
+                                "skipped": True, "note_count": 0})
+                continue
 
             _ensure_piano_roll_on_target(c, channel, pattern, current_note_count)
 
@@ -426,12 +457,16 @@ def register(mcp: FastMCP) -> None:
             write_result = stage_and_run(actions, wait_sec=5.0)
             if write_result.get("ok"):
                 _pattern_note_counts[pattern] = len(pyscript_notes)
+            else:
+                aborted = True
             results.append({
                 "channel": channel,
                 "pattern": pattern,
                 "ok": write_result.get("ok", False),
                 "note_count": len(pyscript_notes),
                 "hotkey_sent": write_result.get("hotkey_sent"),
+                "note": write_result.get("note"),
+                "picked_up_by": (write_result.get("pickup") or {}).get("picked_up_by"),
             })
 
         restored = None
@@ -440,17 +475,22 @@ def register(mcp: FastMCP) -> None:
             if start_ch_idx is not None:
                 c.call("channels.select", index=start_ch_idx)
             time.sleep(0.2)
-            restore_result = stage_and_run([{"action": "export_only"}], wait_sec=5.0)
-            restored = {
-                "pattern": start_pattern,
-                "channel": start_channel.get("channel"),
-                "ok": bool(restore_result.get("ok")),
-            }
+            if aborted:
+                restored = {"pattern": start_pattern, "channel": start_channel.get("channel"),
+                            "ok": False, "skipped_refresh": "an earlier write failed"}
+            else:
+                restore_result = stage_and_run([{"action": "export_only"}], wait_sec=5.0)
+                restored = {
+                    "pattern": start_pattern,
+                    "channel": start_channel.get("channel"),
+                    "ok": bool(restore_result.get("ok")),
+                }
 
         return {
             "results": results,
             "restored": restored,
             "total_notes": sum(r["note_count"] for r in results),
+            "aborted": aborted,
         }
 
     @mcp.tool()

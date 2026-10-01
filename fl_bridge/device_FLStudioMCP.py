@@ -1452,7 +1452,8 @@ _WIN_IDS = {
 def h_ui_focused(_):
     try:
         return {
-            "window_id": ui.getFocused(-1),
+            "window_id": ui.getFocusedFormID(),
+            "caption": ui.getFocusedFormCaption(),
             "visible": bool(ui.isInPopupMenu() == 0),
         }
     except Exception:

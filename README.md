@@ -28,10 +28,10 @@ without a paid subscription.
 ## Requirements
 
 - macOS 12+
-- FL Studio 2025 (Producer Edition or higher — needs MIDI scripting)
+- FL Studio 2026 (also 2025; Producer Edition or higher — needs MIDI scripting)
 - Python 3.10+
-- Accessibility permission granted to your terminal app (needed for `pynput` to
-  send `Cmd+Opt+Y`)
+- Accessibility permission granted to your terminal app (needed to send
+  `Cmd+Opt+Y` to FL Studio)
 
 ## Install
 
@@ -72,14 +72,15 @@ The installer:
 ### Accessibility permission
 
 System Settings → Privacy & Security → Accessibility → enable your terminal
-app (e.g. iTerm2, Terminal) **and** Claude Code. Without this `pynput` cannot
-send `Cmd+Opt+Y` and piano-roll edits will silently fail.
+app (e.g. iTerm2, Terminal) **and** Claude Code. Without this the server cannot
+send `Cmd+Opt+Y`, and every piano-roll edit falls back to the manual prompt
+described below.
 
 ## FL Studio activation
 
 ### One-time MIDI setup
 
-1. Launch FL Studio 2025.
+1. Launch FL Studio.
 2. **Options → MIDI Settings → Input**: find the `fLMCP` IAC Driver row. Set
    **Controller type** = `fLMCP Bridge`, **Port** = 1, click **Enable**.
 3. **Options → MIDI Settings → Output**: same `fLMCP` row, Port = 1.
@@ -99,6 +100,20 @@ FL remembers these settings — you only need to do this once.
 2. Open the Piano Roll editor window, click the **scripts dropdown** (top-left
    corner), and choose **ComposeWithLLM**. You need to do this before working
    with the LLM. FL forgets this on quit, so repeat each time you relaunch FL.
+
+### If FL Studio doesn't respond to the automatic shortcut
+
+Piano-roll reads and edits are triggered by sending `Cmd+Opt+Y` to FL Studio.
+FL Studio 2026 sometimes ignores the automated shortcut for a while. When that
+happens, a dialog titled **FL Studio MCP** appears:
+
+1. Click the Piano Roll's **title bar** (not the note grid — a click there can
+   add a note).
+2. Press **Cmd+Option+Y** on your keyboard.
+
+The pending request runs and the dialog closes by itself; you don't need to
+click OK. If nothing happens within 60 seconds, the request is cancelled
+without changing the Piano Roll and the tool reports the failure.
 
 ## Using with Claude Code (stdio)
 

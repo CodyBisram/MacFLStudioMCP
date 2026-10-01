@@ -1,6 +1,6 @@
 # Mac Port — Technical Notes
 
-This document captures the journey of porting FLStudioMCP to macOS. The motivating constraint is that **FL Studio 2025 on Mac runs Python 3.12 inside a sub-interpreter with extremely aggressive audit hooks**, breaking the upstream TCP-based architecture entirely.
+This document captures the journey of porting FLStudioMCP to macOS. The motivating constraint is that **FL Studio 2025/2026 on Mac runs Python 3.12 inside a sub-interpreter with extremely aggressive audit hooks**, breaking the upstream TCP-based architecture entirely.
 
 ## Capability probe results
 
@@ -77,19 +77,17 @@ This actually fixes a problem the user had in their other repo (`calvinw/fl-stud
 
 `flpianoroll` (the only API for adding/deleting notes) is sandboxed to piano-roll scripts. The bridge can't call it. The trick is to install a piano-roll script (`ComposeWithLLM.pyscript`) that's bound to `Cmd+Opt+Y`, then synthesize that keystroke from outside FL after staging a JSON request file.
 
-We added a Mac implementation in `keystroke.py`. Current macOS builds use the app name `FL Studio 2025` and prefer a native System Events keystroke, with `pynput` as fallback:
+We added a Mac implementation in `keystroke.py`:
 
-```python
-def send_hotkey_mac() -> bool:
-    subprocess.run(['osascript', '-e',
-                    'tell application "FL Studio 2025" to activate'])
-    subprocess.run(['osascript', '-e',
-                    'tell application "System Events" to '
-                    'keystroke "y" using {command down, option down}'])
-    return True
-```
+1. System Events raises the running `OsxFL` process and waits until it is frontmost. The process is targeted rather than an app name because FL Studio 2025 and 2026 share the bundle id `com.image-line.flstudio`.
+2. The bridge shows the Piano Roll (`ui.showWindow`), then the server waits 1 s.
+3. Quartz posts Cmd down, Opt down, Y down, Y up, Opt up, Cmd up as HID-level events (`kCGHIDEventTap`, HID system state source).
+
+FL Studio 2026 ignores the System Events form (`keystroke "y" using {command down, option down}`, and `key code 16 using ...`). There the modifiers are only flags on the Y event; FL needs real Cmd/Opt key presses, which the Quartz sequence provides.
 
 Requires Accessibility permission in System Settings → Privacy & Security → Accessibility for whatever terminal launches the MCP server.
+
+**Manual fallback.** `file_bridge.stage_and_run` waits ~2 s (read-only exports) or the caller's `wait_sec` (edits) for the pyscript's state file. If it doesn't appear, a non-blocking dialog asks the user to click the Piano Roll title bar and press Cmd+Option+Y, and the same staged request waits up to 60 s. The dialog closes itself on pickup. On timeout the request is withdrawn so a later stray press can't apply it. Multi-pattern tools stop at the first failed step instead of prompting once per pattern.
 
 ### 8. Piano roll channel retargeting
 
@@ -137,6 +135,7 @@ A heartbeat log in `OnIdle` is a useful diagnostic — if no heartbeats appear w
 
 - **Piano roll visual rebuilds** — explicit channel retargeting via `openEventEditor` can make the piano-roll window disappear/reappear. Prefer pattern-only auto-locate reads when possible; use explicit `ui.openPianoRoll` only when the channel must be forced.
 - **The user must run `ComposeWithLLM` once via the piano-roll scripts dropdown** at the start of each FL session. `Cmd+Opt+Y` re-runs whichever piano-roll script was last launched manually.
+- **FL Studio 2026 can ignore the generated shortcut.** Generated Quartz Cmd+Option+Y can sometimes be ignored for extended runs despite FL Studio being frontmost and the bridge reporting the same observable focus state. A physical click on the Piano Roll title bar followed by physical Cmd+Option+Y has been demonstrated to recover the operation. The underlying FL Studio state causing this remains unknown. Observed: `ui.setFocused(widPianoRoll)` never changes FL's focused form, and retrying the same request a few seconds apart doesn't recover a failing run. FL 2026's own assistant runs piano-roll scripts through an internal `ilmcp` module that controller scripts cannot import.
 - **The user must have the right channel × pattern's piano roll loaded before piano-roll edits.** Programmatic retargeting via `ui.openPianoRoll` works (see point 8 above), but if the user manually navigates afterward without going through `ui.openPianoRoll`, the next piano-roll edit will affect whichever channel is currently shown.
 
 ## Files changed in the port
@@ -145,11 +144,11 @@ A heartbeat log in `OnIdle` is a useful diagnostic — if no heartbeats appear w
 - `src/fl_studio_mcp/bridge_client.py` — full rewrite, file-bus instead of TCP socket.
 - `src/fl_studio_mcp/protocol.py` — stripped TCP framing helpers; now exposes path helpers + `RPCError`.
 - `src/fl_studio_mcp/file_bridge.py` — minor docstring updates.
-- `src/fl_studio_mcp/keystroke.py` — added `send_hotkey_mac`, kept `send_hotkey_windows`.
+- `src/fl_studio_mcp/keystroke.py` — added `send_hotkey_mac` (Quartz HID keystroke), kept `send_hotkey_windows`.
 - `src/fl_studio_mcp/server.py` — conditional import for audio/voice tools.
 - `src/fl_studio_mcp/tools/meta.py` — updated docstrings/hints for file-bus terminology.
 - `src/fl_studio_mcp/tools/piano_roll.py` — added `piano_roll_read_patterns_autolocate` for MCP-native pattern-only reads.
 - `tests/test_protocol.py` — rewrote against fake worker thread that watches a tmp bus dir.
-- `pyproject.toml` — added `[mac]` optional extra (`pynput`).
+- `pyproject.toml` — `pyobjc-framework-Quartz` (macOS only) for the hotkey; `[mac]` extra for the PyQt5 hotkey button.
 - `install_mac.sh` — NEW.
 - `scripts/smoke_test_mac.py`, `scripts/test_step{2,3,4}_*.py`, `scripts/test_retarget.py`, `scripts/test_read_all_notes.py` — NEW.

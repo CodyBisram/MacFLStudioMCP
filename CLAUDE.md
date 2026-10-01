@@ -21,7 +21,7 @@ This file gives any future Claude session enough context to be useful immediatel
 
 ## What this project is
 
-macOS port of [geezoria/FLStudioMCP](https://github.com/geezoria/FLStudioMCP). The upstream is Windows-only; FL Studio 2025 on macOS runs Python in a heavily-restricted sub-interpreter that blocks the upstream TCP architecture entirely. This fork replaces TCP with a file-bus that works within those constraints.
+macOS port of [geezoria/FLStudioMCP](https://github.com/geezoria/FLStudioMCP). The upstream is Windows-only; FL Studio 2025/2026 on macOS runs Python in a heavily-restricted sub-interpreter that blocks the upstream TCP architecture entirely. This fork replaces TCP with a file-bus that works within those constraints.
 
 Calvin Williamson (calvin.e.williamson@gmail.com) maintains this repo. There is also a separate simpler Mac-native MCP server at `calvinw/fl-studio-mcp` (MIDI/SysEx, ~13 tools) — this fork exists to get the full 160+ tool surface working on Mac.
 
@@ -58,11 +58,19 @@ redundant wrappers around hardcoded templates. The correct workflow is:
 To re-enable generators: uncomment `# generators,` in the imports and
 `# generators.register(mcp)` in `build_app()` in `src/fl_studio_mcp/server.py`.
 
+### macOS hotkey is Quartz, with a manual fallback
+
+- **Do not go back to System Events `keystroke "y" using {command down, option down}`** (or `key code 16 using ...`). FL Studio 2026 ignores it: the modifiers are only flags on the Y event. `_send_cmd_opt_y_quartz` posts real Cmd/Opt key-down/up events at `kCGHIDEventTap`, which FL accepts.
+- **Do not reintroduce the `pynput` fallback.** It only ran when FL could not be brought to the front, so it typed Cmd+Opt+Y into whatever app was frontmost.
+- **Do not add automatic shortcut retries.** They don't recover a failing run; the 60 s manual dialog does.
+- **`ui.setFocused(widPianoRoll)` does not give the Piano Roll keyboard focus.** FL's focused form stays unchanged; the Piano Roll does not need to be FL's focused form for the shortcut to work.
+- FL is raised by its process name `OsxFL`, not by app name — FL 2025 and 2026 share the bundle id `com.image-line.flstudio`, so targeting by name/id can launch the wrong installed version.
+
 ---
 
 ## The Mac problem (why everything is files)
 
-FL Studio 2025 on macOS runs Python 3.12 inside a **sub-interpreter with aggressive audit-hook restrictions**:
+FL Studio 2025/2026 on macOS runs Python 3.12 inside a **sub-interpreter with aggressive audit-hook restrictions**:
 
 ```
 threads:    FAIL — start_new_thread returned NULL
@@ -94,7 +102,7 @@ There is currently no known way to open a socket inside FL Studio's Python inter
 │ fl-studio-mcp  (.venv/bin/python -m fl_studio_mcp)          │
 │   • BridgeClient  — file-bus RPC client                     │
 │   • file_bridge   — piano-roll bus + Cmd+Opt+Y trigger      │
-│   • keystroke     — osascript focus + pynput keystroke      │
+│   • keystroke     — raise OsxFL + Quartz Cmd+Opt+Y          │
 └──────────────────────┬──────────────────────────────────────┘
                        │ plain files only (no TCP, no MIDI data)
                        ▼
@@ -113,7 +121,7 @@ There is currently no known way to open a socket inside FL Studio's Python inter
 ### Two file buses
 
 1. **Main bus** (`bus/`) — 150+ tools. Controller script polls in `OnIdle()`.
-2. **Piano-roll bus** (`fLMCP_*.json`) — piano-roll edits only. Triggered by `Cmd+Opt+Y` via osascript + pynput.
+2. **Piano-roll bus** (`fLMCP_*.json`) — piano-roll edits only. Triggered by `Cmd+Opt+Y`: System Events raises the running `OsxFL` process, then Quartz posts the keys as HID events. If the pyscript doesn't run within ~2 s (longer for edits), a dialog asks the user for a physical press and the same request waits up to 60 s.
 
 ### File operations — what runs where
 
@@ -140,7 +148,7 @@ There is currently no known way to open a socket inside FL Studio's Python inter
 2. **FL MIDI Input** — `fLMCP` row, Controller type = `fLMCP Bridge`, Port = 1, Enable.
 3. **FL MIDI Output** — same row, Port = 1. *(Both required — OnIdle only fires on active controllers.)*
 4. **`./install_mac.sh`** — copies bridge files, creates `bus/`, pre-creates stub files.
-5. **Accessibility permission** — System Settings → Privacy & Security → Accessibility → terminal app + Claude Code. Required for `pynput`.
+5. **Accessibility permission** — System Settings → Privacy & Security → Accessibility → terminal app + Claude Code. Required to post the Quartz keystroke.
 6. **First-run bind** — open any piano roll → scripts dropdown → click `ComposeWithLLM`. Repeat each FL relaunch.
 7. **MCP registered** — `claude mcp add --transport stdio fl-studio-mcp -- /Users/calvinw/develop/MacFLStudioMCP/.venv/bin/python -m fl_studio_mcp` (in `~/.claude.json`).
 
@@ -162,7 +170,7 @@ uninstall_event_investigator.sh # removes it
 src/fl_studio_mcp/
 ├── bridge_client.py            # file-bus RPC client
 ├── file_bridge.py              # piano-roll bus + stage_and_run()
-├── keystroke.py                # send_hotkey_mac() — osascript focus + pynput Cmd+Opt+Y
+├── keystroke.py                # send_hotkey_mac() — raise OsxFL + Quartz HID Cmd+Opt+Y
 ├── protocol.py                 # path helpers + RPCError
 ├── server.py                   # FastMCP entry; generators disabled here
 └── tools/
@@ -203,10 +211,16 @@ tests/
 2. OnIdle not firing — check both Input AND Output are assigned to the fLMCP IAC port at Port=1.
 3. `bus/` dir missing — run `./install_mac.sh`.
 
-### Piano-roll edits silently fail (`ok=False, hotkey_sent=True`)
-1. `ComposeWithLLM` not the active piano-roll script — click it once from the scripts dropdown.
-2. Accessibility permission missing for terminal / Claude Code.
-3. Piano roll open on wrong channel (use pattern-only switching via `piano_roll_read_patterns_autolocate`).
+### "FL Studio didn't respond automatically" dialog / piano-roll call returns `ok=False`
+The automated `Cmd+Opt+Y` wasn't picked up, so `stage_and_run` showed the manual dialog. The user clicks the Piano Roll title bar and presses Cmd+Option+Y; the same staged request then runs. After 60 s the request is withdrawn (`pickup.request_withdrawn`). If `pickup.late_state_after_withdrawal` is true, a run finished just after the withdrawal and the edit may have been applied — re-read before retrying.
+
+Causes, most likely first:
+1. FL Studio 2026 intermittently ignores the generated shortcut (see below) — the dialog is the intended recovery.
+2. `ComposeWithLLM` not the active piano-roll script — click it once from the scripts dropdown.
+3. Accessibility permission missing for terminal / Claude Code (Quartz events are dropped silently).
+4. Piano roll open on wrong channel (use pattern-only switching via `piano_roll_read_patterns_autolocate`).
+
+**Unresolved FL Studio 2026 behavior:** generated Quartz Cmd+Option+Y can sometimes be ignored for extended runs despite FL Studio being frontmost and the bridge reporting the same observable focus state. A physical click on the Piano Roll title bar followed by physical Cmd+Option+Y has been demonstrated to recover the operation. The underlying FL Studio state causing this remains unknown. Retrying the same request a few seconds apart does not recover a failing run, which is why there are no automatic retries.
 
 ### Piano roll window disappears/reappears
 This should no longer happen. `_ensure_piano_roll_on_target` always calls `openEventEditor` with `new_window=0`, which retargets the viewport smoothly without closing or reopening the window — equivalent to double-clicking a pattern in the Playlist. If you see the window close and reopen, check that `new_window=0` is still being passed in `h_ui_open_piano_roll`.

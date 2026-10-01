@@ -13,7 +13,7 @@ the actual edits — only for FL API setup (selecting channel, opening piano rol
 Prerequisites:
   • ComposeWithLLM is selected as the active piano-roll script
     (open any piano roll → scripts dropdown → ComposeWithLLM)
-  • Terminal has Accessibility permission so pynput can send the keystroke
+  • Terminal has Accessibility permission so the server can send the keystroke
 """
 
 from __future__ import annotations

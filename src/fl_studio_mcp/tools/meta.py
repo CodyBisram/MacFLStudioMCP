@@ -97,7 +97,7 @@ def register(mcp: FastMCP) -> None:
     def fl_test_mac_restrictions() -> dict:
         """Test which operations are blocked by FL Studio's macOS audit hook.
 
-        FL Studio 2025 on macOS runs Python in a heavily-restricted sub-interpreter.
+        FL Studio 2025/2026 on macOS runs Python in a heavily-restricted sub-interpreter.
         This tool reports which operations are blocked (sockets, threads, subprocess,
         file I/O restrictions, etc.) and which are allowed.
 

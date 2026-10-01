@@ -11,7 +11,7 @@ This is the correct pre-edit snapshot workflow:
 Prerequisites:
   • ComposeWithLLM is the active piano-roll script (bound once from the
     piano roll scripts dropdown — persists across channel/pattern switches)
-  • Terminal has Accessibility permission so pynput can send Cmd+Opt+Y
+  • Terminal has Accessibility permission so the server can send Cmd+Opt+Y
 """
 
 from __future__ import annotations
